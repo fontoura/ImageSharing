@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Title of the document</title>
+<script src="/jquery.js"></script>
+</head>
+
+<body>
+<canvas id="canvas"></canvas>
+</body>
+
+<script>
+
+// cria uma matriz vazia.
+function createMatrix( w, h )
+{
+	var array = new Array( w );
+	for ( var i = 0; i < w; i ++ )
+	{
+		array[i] = new Array(h);
+	}
+	return array;
+}
+
+function divideAndRoundUp( a, b )
+{
+	var ai = (0|a);
+	var bi = (0|b);
+	return (0|((ai + bi - 1)/bi));
+}
+
+$( document ).ready( function ()
+{
+	$("#canvas").click(function () { copyrightNotice.show(); });
+
+	var state = "IDLE";
+
+	var reloadTileQueue = [];
+
+	var imageId = 0;
+	var screenWidth = 0;
+	var screenHeight = 0;
+	var tileWidth = 0;
+	var tileHeight = 0;
+	var tileTimestampForNextRequest = 0;
+	var tileMatrix = [[]];
+
+	requestInformation();
+
+	function requestInformation()
+	{
+		state = "REQUESTING_INFORMATION"
+		sendAJAXToRequestInformation( function ( err, data )
+		{
+			if ( err )
+			{
+				state = "ERROR";
+
+				// espera 5 segundos e tenta de novo
+				setTimeout( requestInformation, 5000 );
+				return;
+			}
+
+			imageId = data.image_id;
+			screenWidth = data.image_width;
+			screenHeight = data.image_height;
+			tileWidth = data.tile_width;
+			tileHeight = data.tile_height;
+			tileTimestampForNextRequest = data.tile_timestamp;
+
+			var tilesXAxis = divideAndRoundUp( screenWidth, tileWidth );
+			var tilesYAxis = divideAndRoundUp( screenHeight, tileHeight );
+			tileMatrix = createMatrix( tilesXAxis, tilesYAxis );
+
+			for ( var y = 0; y < tilesYAxis; y ++ )
+			for ( var x = 0; x < tilesXAxis; x ++ )
+			{
+				tileMatrix[x][y] = { x: x, y: y, timestamp: 0, image: null };
+				reloadTileQueue.push( { x: x, y: y } );
+			}
+
+			// redimensiona o canvas.
+			// fonjte: <https://stackoverflow.com/a/11368667>
+			var ctx = $( "#canvas" )[0].getContext('2d');
+			ctx.canvas.width = screenWidth;
+			ctx.canvas.height = screenHeight;
+
+			gotoReload();
+		} );
+	}
+
+	function gotoReload()
+	{
+		if ( reloadTileQueue.length > 0 )
+		{
+			var tileX = reloadTileQueue[0].x;
+			var tileY = reloadTileQueue[0].y;
+
+			state = "LOAD_TILE";
+			sendAJAXToRequestTile( tileX, tileY, function ( err, data )
+			{
+				//console.log( "Returned from loading tile at (" + tileX + ", " + tileY + ")" );
+				if ( err )
+				{
+					state = "ERROR";
+
+					// espera 5 segundos e tenta de novo
+					reloadTileQueue = [];
+					setTimeout( requestInformation, 5000 );
+					return;
+				}
+
+				if ( data.type == "SUCCESS" )
+				{
+					tileMatrix[tileX][tileY].image = data.image;
+					tileMatrix[tileX][tileY].timestamp = data.tile_timestamp;
+
+					drawTile( tileX, tileY, function ()
+					{
+						//console.log( "Drawn" );
+						reloadTileQueue.shift();
+						gotoReload();
+					} );
+				}
+				else
+				{
+					reloadTileQueue = [];
+					requestInformation();
+				}
+
+			} );
+		}
+		else
+		{
+			sendAJAXToRequestDelta( function ( err, data )
+			{
+				if ( err )
+				{
+					state = "ERROR";
+
+					// espera 5 segundos e tenta de novo
+					reloadTileQueue = [];
+					setTimeout( requestInformation, 5000 );
+					return;
+				}
+
+				reloadTileQueue = data.tiles || [];
+				console.log( "at " + new Date() + ": will reload " + reloadTileQueue.length + " tiles"  );
+				tileTimestampForNextRequest = data.tile_timestamp || 0;
+				console.log( "timestamp for next request: " + tileTimestampForNextRequest );
+
+				if ( reloadTileQueue.length == 0 )
+				{
+					setTimeout( gotoReload, 1000 );
+				}
+				else
+				{
+					//gotoReload();
+					setTimeout( gotoReload, 250 );
+				}
+			} );
+		}
+	}
+
+	function drawTile( x, y, cb )
+	{
+		// fonte: <https://stackoverflow.com/a/4409745>
+		var ctx = $( "#canvas" )[0].getContext('2d');
+		var image = new Image();
+		image.onload = function ()
+		{
+			ctx.drawImage(image, x * tileWidth, y * tileHeight);
+			cb();
+		};
+		image.src = "data:image/png;base64," + tileMatrix[x][y].image;
+	}
+
+	function sendAJAXToRequestInformation( cb )
+	{
+		//console.log( "AJAX to Request information... entering" );
+
+		var err = null;
+		var ans = null;
+		$.ajax( {
+			url: "/ajax/getInformation",
+			type: "post",
+			dataType: "json",
+			contentType: "application/json",
+			data: JSON.stringify( {} ),
+			success: function ( a )
+			{
+				ans = a;
+			},
+			error: function ( e )
+			{
+				err = e;
+			},
+			complete: function ()
+			{
+				if ( cb != null )
+				{
+					cb( err, ans );
+				}
+			}
+		} );
+	}
+
+	function sendAJAXToRequestTile( x, y, cb )
+	{
+		//console.log( "AJAX to Request tile at (" + x + ", " + y + ")... entering" );
+
+		var err = null;
+		var ans = null;
+		$.ajax( {
+			url: "/ajax/getTile",
+			type: "post",
+			dataType: "json",
+			contentType: "application/json",
+			data: JSON.stringify( {
+				"image_id": imageId,
+				"tile_x": x,
+				"tile_y": y
+			} ),
+			success: function ( a )
+			{
+				ans = a;
+			},
+			error: function ( e )
+			{
+				err = e;
+			},
+			complete: function ()
+			{
+				if ( cb != null )
+				{
+					cb( err, ans );
+				}
+			}
+		} );
+	}
+
+	function sendAJAXToRequestDelta( cb )
+	{
+		//console.log( "AJAX to Request delta... entering" );
+
+		var err = null;
+		var ans = null;
+		$.ajax( {
+			url: "/ajax/getDelta",
+			type: "post",
+			dataType: "json",
+			contentType: "application/json",
+			data: JSON.stringify( {
+				"image_id": imageId,
+				"tile_timestamp": tileTimestampForNextRequest
+			} ),
+			success: function ( a )
+			{
+				ans = a;
+			},
+			error: function ( e )
+			{
+				err = e;
+			},
+			complete: function ()
+			{
+				if ( cb != null )
+				{
+					cb( err, ans );
+				}
+			}
+		} );
+	}
+} );
+
+</script>
+
+<script>
+
+var copyrightNotice = new (function CopyrightNotice(){
+	var $elem = null;
+
+	var shown = false;
+	var timeoutId = null;
+
+	this.init = init;
+	this.show = show;
+
+	function show()
+	{
+		if ($elem == null)
+		{
+			init();
+		}
+	
+		if (shown)
+		{
+			clearTimeout(timeoutId);
+			timeoutId = null;
+		}
+		$elem.show();
+		shown = true;
+		timeoutId = setTimeout(function ()
+		{
+			hide();
+		}, 15000);
+	}
+	
+	function hide()
+	{
+		if (shown)
+		{
+			clearTimeout(timeoutId);
+			timeoutId = null;
+		}
+		$elem.hide();
+		shown = false;
+	}
+
+	function init()
+	{
+		if ($elem != null)
+		{
+			return;
+		}
+
+		$elem = $("<div style='position: absolute; background-color: rgba(255,255,255,0.5); left: 0; top: 0; width: 100%; height: 100%; display: table; vertical-align: middle; text-align: center;'><div style='text-align: center; vertical-align: middle; display: table-cell; font-family: monospace;'><div style='background-color: #fff; display: inline-block; padding: 10pt; text-align: left;'>" +
+			"<div>Copyright (c) 2019 Felipe Michels Fontoura</div>"                             +
+			"<br/>"                                                                             +
+			"<div>"                                                                             +
+			"Permission is hereby granted, free of charge, to any person obtaining a copy<br/>" +
+			"of this software and associated documentation files (the \"Software\"), to<br/>"   +
+			"deal in the Software without restriction, including without limitation the<br/>"   +
+			"rights to use, copy, modify, merge, publish, distribute, sublicense, and/or<br/>"  +
+			"sell copies of the Software, and to permit persons to whom the Software is<br/>"   +
+			"furnished to do so, subject to the following conditions:"                          +
+			"</div>"                                                                            +
+			"<br/>"                                                                             +
+			"<div>"                                                                             +
+			"The above copyright notice and this permission notice shall be included in<br/>"   +
+			"all copies or substantial portions of the Software."                               +
+			"</div>"                                                                            +
+			"<br/>"                                                                             +
+			"<div>"                                                                             +
+			"THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR<br/>" +
+			"IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,<br/>"     +
+			"FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE<br/>"  +
+			"AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER<br/>"       +
+			"LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING<br/>"      +
+			"FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS<br/>" +
+			"IN THE SOFTWARE."                                                                  +
+			"</div>"                                                                            +
+			"<br/>"                                                                             +
+			"<div>"                                                                             +
+			"Except as contained in this notice, the name of the above copyright holder<br/>"   +
+			"shall not be used in advertising or otherwise to promote the sale, use or<br/>"    +
+			"other dealings in this Software without prior written authorization."              +
+			"</div>"                                                                            +
+		"</div></span></div>");
+		$("body").append($elem);
+		$elem.click(hide);
+		$elem.hide();
+	}
+});
+
+$(document).ready(copyrightNotice.show);
+
+</script>
+
+</html>
+<html>
